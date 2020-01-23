@@ -1,0 +1,10 @@
+pandas
+numpy
+scipy
+matplotlib
+seaborn
+pandas_profiling
+dovpanda
+tweepy
+ndjson
+tqdm
