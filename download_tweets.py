@@ -26,7 +26,7 @@ def download_user_history(api, output_name, screen_name=None, user_id=None, sinc
     users = {}
     for page in tweepy.Cursor(api.user_timeline, screen_name=screen_name, user_id=user_id, tweet_mode="extended",
                               since_id=since_id, count=200, exclude_replies=exclude_replies).pages():
-        res.extend(page)
+        res.extend([item._json for  item in page])
         if save_retweeters:
             for item in page:
                 users[item.id] = api.retweeters(item.id)
@@ -56,17 +56,17 @@ def download_users_and_retweeters(api, output_dir, screen_name="realDonaldTrump"
     print("Downloading Retweeters")
     users = reduce(set.union, users.values(), set())
     for user in tqdm.tqdm(users):
-        download_user_history(api, os.path.join(output_dir, "retweeters", user + ".ndjson"), user_id=user,
+        download_user_history(api, os.path.join(output_dir, "retweeters", str(user) + ".ndjson"), user_id=user,
                               save_retweeters=False)
 
     print("Downloading Followers")
     for follower in tweepy.Cursor(api.followers, screen_name=screen_name, count=200).items():
-        download_user_history(api, os.path.join(output_dir, "followers", follower.id + ".ndjson"), user_id=follower.id,
+        download_user_history(api, os.path.join(output_dir, "followers", str(follower.id) + ".ndjson"), user_id=follower.id,
                               save_retweeters=False)
 
     print("Downloading Friends")
     for friend in tweepy.Cursor(api.friends, screen_name=screen_name, count=200).items():
-        download_user_history(api, os.path.join(output_dir, "friends", friend.id + ".ndjson"), user_id=friend.id,
+        download_user_history(api, os.path.join(output_dir, "friends", str(friend.id) + ".ndjson"), user_id=friend.id,
                               save_retweeters=False)
 
 

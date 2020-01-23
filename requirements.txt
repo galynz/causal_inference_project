@@ -8,3 +8,4 @@ dovpanda
 tweepy
 ndjson
 tqdm
+jupyter
