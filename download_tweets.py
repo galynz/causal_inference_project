@@ -5,6 +5,7 @@ import ndjson
 import tweepy
 import os
 import tqdm
+from tweepy import TweepError
 
 CONSUMER_KEY = os.environ.get("CONSUMER_KEY", None)
 CONSUMER_SECRET = os.environ.get("CONSUMER_SECRET", None)
@@ -14,7 +15,7 @@ ACCESS_KEY_SECRET = os.environ.get("ACCESS_KEY_SECRET", None)
 def download_tweet_list(api, output, ids):
     res = []
     for i in tqdm.tqdm(range(len(ids)//100 + 1)):
-        statuses = api.statuses_lookup(ids[i:i+100],  tweet_mode="extended")
+        statuses = api.statuses_lookup(ids[i*100:(i+1)*100],  tweet_mode="extended")
         res.extend([status._json for status in statuses])
     with open(output,"w") as output:
         ndjson.dump(res, output)
@@ -23,50 +24,59 @@ def download_tweet_list(api, output, ids):
 def download_user_history(api, output_name, screen_name=None, user_id=None, since_id=None, exclude_replies=False,
                           save_retweeters=False):
     res = []
-    users = {}
     for page in tweepy.Cursor(api.user_timeline, screen_name=screen_name, user_id=user_id, tweet_mode="extended",
                               since_id=since_id, count=200, exclude_replies=exclude_replies).pages():
-        res.extend([item._json for  item in page])
-        if save_retweeters:
-            for item in page:
-                users[item.id] = api.retweeters(item.id)
+        res.extend(page)
+    res = [item._json for item in res]
 
     with open(output_name, "w") as output:
         ndjson.dump(res, output)
+
     if save_retweeters:
+        print("Extracting retweeters")
+        users = {}
+        for item in res:
+            users[item["id"]] = api.retweeters(item["id"])
         with open(output_name + ".retweets.json", "w") as output:
             json.dump(users, output)
-    return users
+        return users
 
 
-def download_users_and_retweeters(api, output_dir, screen_name="realDonaldTrump"):
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    if not os.path.exists(os.path.join(output_dir, "retweeters")):
-        os.makedirs(os.path.join(output_dir, "retweeters"))
-    if not os.path.exists(os.path.join(output_dir, "followers")):
-        os.makedirs(os.path.join(output_dir, "followers"))
-    if not os.path.exists(os.path.join(output_dir, "friends")):
-        os.makedirs(os.path.join(output_dir, "friends"))
+def download_users_and_retweeters(api, output_dir, screen_name="realDonaldTrump", resume=True):
+    retweeters_folder = os.path.join(output_dir, "retweeters")
+    followers_folder = os.path.join(output_dir, "followers")
+    friends_folder = os.path.join(output_dir, "friends")
+    for folder in [output_dir, retweeters_folder, followers_folder, friends_folder]:
+        if not os.path.exists(folder):
+            os.makedirs(folder)
 
     print("Downloading Tweets")
-    users = download_user_history(api, os.path.join(output_dir, screen_name + ".ndjson"), screen_name=screen_name,
-                                  save_retweeters=True)
+    retweeter_list = os.path.join(output_dir, screen_name + ".ndjson.retweets.json")
+    if not resume or not os.path.exists(retweeter_list):
+        users = download_user_history(api, os.path.join(output_dir, screen_name + ".ndjson"), screen_name=screen_name,
+                                      save_retweeters=True)
+    else:
+        users = json.load(retweeter_list)
 
-    print("Downloading Retweeters")
     users = reduce(set.union, users.values(), set())
+    users = users - set(int(fname.split(".")[0]) for fname in os.listdir(retweeters_folder))
+    print("Downloading Retweeters")
     for user in tqdm.tqdm(users):
-        download_user_history(api, os.path.join(output_dir, "retweeters", str(user) + ".ndjson"), user_id=user,
-                              save_retweeters=False)
+        try:
+            download_user_history(api, os.path.join(retweeters_folder, str(user) + ".ndjson"), user_id=user,
+                                  save_retweeters=False)
+        except TweepError as e:
+            print("Failed for user: {}".format(user))
+            print(e)
 
     print("Downloading Followers")
     for follower in tweepy.Cursor(api.followers, screen_name=screen_name, count=200).items():
-        download_user_history(api, os.path.join(output_dir, "followers", str(follower.id) + ".ndjson"), user_id=follower.id,
+        download_user_history(api, os.path.join(followers_folder, str(follower.id) + ".ndjson"), user_id=follower.id,
                               save_retweeters=False)
 
     print("Downloading Friends")
     for friend in tweepy.Cursor(api.friends, screen_name=screen_name, count=200).items():
-        download_user_history(api, os.path.join(output_dir, "friends", str(friend.id) + ".ndjson"), user_id=friend.id,
+        download_user_history(api, os.path.join(friends_folder, str(friend.id) + ".ndjson"), user_id=friend.id,
                               save_retweeters=False)
 
 
