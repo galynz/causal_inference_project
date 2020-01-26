@@ -12,5 +12,7 @@ jupyter
 nltk
 textblob
 gensim
-dask[dataframe]
+dask[dataframe,distributed]
 scikit-learn
+cloudpickle
+bokeh

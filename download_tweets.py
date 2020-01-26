@@ -56,7 +56,7 @@ def download_users_and_retweeters(api, output_dir, screen_name="realDonaldTrump"
         users = download_user_history(api, os.path.join(output_dir, screen_name + ".ndjson"), screen_name=screen_name,
                                       save_retweeters=True)
     else:
-        users = json.load(retweeter_list)
+        users = json.load(open(retweeter_list, "r"))
 
     users = reduce(set.union, users.values(), set())
     users = users - set(int(fname.split(".")[0]) for fname in os.listdir(retweeters_folder))
