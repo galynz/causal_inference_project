@@ -53,6 +53,7 @@ def download_users_and_retweeters(api, output_dir, screen_name="realDonaldTrump"
     print("Downloading Tweets")
     retweeter_list = os.path.join(output_dir, screen_name + ".ndjson.retweets.json")
     if not resume or not os.path.exists(retweeter_list):
+        print("NOOOOOOOOOOOOOOOOOOOOO!")
         users = download_user_history(api, os.path.join(output_dir, screen_name + ".ndjson"), screen_name=screen_name,
                                       save_retweeters=True)
     else:
@@ -91,4 +92,4 @@ if __name__ == "__main__":
     #df = pd.read_csv("https://raw.githubusercontent.com/ENCASEH2020/hatespeech-twitter/master/hatespeech_labels.csv")
     #download_tweet_list(api, "found_tweets.txt", list(df["tweet_id"].values))
 
-    download_users_and_retweeters(api, r"C:\Develop\causal_inference_project\data\crawling", screen_name="realDonaldTrump")
+    download_users_and_retweeters(api, r"D:\Research\causal_inference_data2", screen_name="realDonaldTrump")
