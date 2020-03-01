@@ -9,3 +9,10 @@ tweepy
 ndjson
 tqdm
 jupyter
+nltk
+textblob
+gensim
+dask[dataframe,distributed]
+scikit-learn
+cloudpickle
+bokeh
