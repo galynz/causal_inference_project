@@ -1,10 +1,15 @@
+"""
+Prepares the data for analysis. Heavy script that use parallelization to speed it up.
+"""
 import datetime
+from dateutil import parser
 
 import bisect
 import dateutil
 import shutil
 
 import dask.bag as db
+from functools import partial
 from transformers import pipeline
 import json
 import os
@@ -12,13 +17,36 @@ import glob
 from dask.distributed import Client, progress, get_client, LocalCluster
 import re
 import pandas as pd
+import sys
 
 FINAL_LINK = re.compile(r"https://t\.co/\w+$")
+
+
+class Encoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime.datetime):
+            return obj.isoformat()
+        else:
+            return json.JSONEncoder.default(self, obj)
+
+class Decoder(json.JSONDecoder):
+    def __init__(self, *args, **kwargs):
+        super(Decoder, self).__init__(object_hook=self.object_hook, *args, **kwargs)
+
+    def object_hook(self, source):
+        for key, value in source.items():
+            try:
+                source[key] = parser.parse(value)
+            except:
+                pass
+        return source
+
 
 class HierarchicalPath(os.PathLike):
     """
     Utility class for easy access of files and folders
     """
+
     def __init__(self, base_path):
         self.base_path = base_path
 
@@ -46,7 +74,12 @@ class TweeterBag(db.Bag):
                 num_workers = len(client.cluster.worker_spec)
                 client.cluster.scale(max_workers)
 
-            self.map(json.dumps).to_textfiles(f"{output_path}/*.ndjson")#, name_function=self._name_function)
+            try:
+                self.map(lambda x: json.dumps(x, cls=Encoder)).to_textfiles(f"{output_path}/*.ndjson")
+            except ValueError():
+                shutil.rmtree(output_path, ignore_errors=True)
+                print(f"Failed saving. Removing path ({output_path}).")
+                raise
 
             if max_workers is not None and hasattr(client, "cluster"):
                 client.cluster.scale(num_workers)
@@ -105,6 +138,7 @@ class TweeterBag(db.Bag):
                           "created_at", "statuses_count", "location"]:
                 base[f"{prefix}_user_{field}"] = tweet["user"][field]
             return base
+
         return self.map(extract_features)
 
 
@@ -113,11 +147,47 @@ def read_tweets(path):
     return TweeterBag(*db.read_text(names)._args).map(json.loads)
 
 
+def is_response_to_trump(tweet):
+    if tweet["in_reply_to_status_id_str"] is not None:
+        return tweet["in_reply_to_screen_name"] == "readDonaldTrump"
+
+    elif "quoted_status" in tweet:
+        return tweet.get("quoted_status", {}).get("user", {}).get("screen_name") == "realDonaldTrump"
+
+    elif "retweeted_status" in tweet:
+        return tweet.get("retweeted_status", {}).get("user", {}).get("screen_name") == "realDonaldTrump"
+
+    return False
+
+
+def get_response_id(tweet):
+    if tweet["in_reply_to_status_id_str"] is not None:
+        return tweet["in_reply_to_status_id_str"]
+
+    elif "quoted_status" in tweet:
+        return tweet.get("quoted_status", {}).get("id_str")
+
+    elif "retweeted_status" in tweet:
+        return tweet.get("retweeted_status", {}).get("id_str")
+
+def dataframe_to_tweeter_bag(df):
+    return TweeterBag(*df.to_bag()._args).map(lambda x: dict(zip(df.columns, x)))
+
+
 def extract_text(tweet):
     if tweet == {}:
         return None
     start, end = tweet["display_text_range"]
     return re.sub(FINAL_LINK, "", tweet["full_text"][start:end]).strip()
+
+
+def add_trump_status_id(pair):
+    tweet, trump_before, trump_after = pair
+    tweet["tweet"]["trump_before_status_id"] = trump_before[1]
+    tweet["tweet"]["trump_before_status_time"] = trump_before[0]
+    tweet["tweet"]["trump_after_status_id"] = trump_after[1]
+    tweet["tweet"]["trump_after_status_time"] = trump_after[0]
+    return tweet["tweet"]
 
 
 def prepare_data_reply_analysis(input_path, output_path, overwrite_all=False):
@@ -156,7 +226,8 @@ def prepare_data_reply_analysis(input_path, output_path, overwrite_all=False):
     )
     return pd.DataFrame(data.compute())
 
-def prepare_data_before_and_after(input_path, output_path, time_buffer=5*3600, overwrite_all=False):
+
+def prepare_data_before_and_after(input_path, output_path, time_buffer=5 * 3600, overwrite_all=False):
     trump_tweets = (
         read_tweets(input_path["trump"])
             .sentiment_analysis()
@@ -165,44 +236,74 @@ def prepare_data_before_and_after(input_path, output_path, time_buffer=5*3600, o
             .map(lambda row: {k: v for k, v in row.items() if k.startswith("trump")})
     )
 
-    ordered_tweets = read_tweets(input_path["trump"]).map(
-        lambda row: (dateutil.parser.parse(row["created_at"]), row["id"])
-    ).compute()
-    ordered_tweets = sorted(ordered_tweets, key=lambda x: x[0])
-
-    def get_tweets(row):
-        row_time = dateutil.parser.parse(row["created_at"])
-        diff = datetime.timedelta(seconds=time_buffer)
-        start = bisect.bisect_left(ordered_tweets, (row_time - diff,))
-        end = bisect.bisect_right(ordered_tweets, (row_time + diff,))
-        return {"tweet": row, "trump_tweets_id": [x[1] for x in ordered_tweets[start:end]]}
+    # Get all trump interactions for a user
+    interaction_by_user = (
+        read_tweets(input_path["retweeters"])
+            .filter(is_response_to_trump)
+            .map(
+            lambda x: (x["user"]["id_str"], {(x["created_at"], get_response_id(x))})
+        ).foldby(lambda x: x[0], lambda x, y: (x[0], x[1] | y[1]))
+            .map(lambda x: (x[1][0], list(x[1][1])))
+            .checkpoint(output_path["interaction_by_user"], overwrite=overwrite_all)
+            .map(
+            lambda x: {"tweet_user_id": x[0], "trump_interactions": [[parser.parse(y[0]), y[1]] for y in x[1]]}
+        )
+    )
 
     retweeters = (
-        read_tweets(input_path["retweeters"])
-            .map(get_tweets)
-            .filter(lambda row: len(row["trump_tweets_id"]) > 0)
-            .map(lambda row: row["tweet"])
+        dataframe_to_tweeter_bag(
+            read_tweets(input_path["retweeters"]).map(lambda x: {
+                "timestamp": dateutil.parser.parse(x["created_at"]),
+                "tweet": x,
+                "tweet_user_id": x["user"]["id_str"]
+            }).to_dataframe().merge(
+                interaction_by_user.to_dataframe(), on="tweet_user_id",
+            )
+        ).checkpoint(output_path["tweets_trump_product"], max_workers=2, overwrite=overwrite_all).map(
+            lambda x: (
+                x,
+                min(
+                    filter(lambda p: dateutil.parser.parse(p[0]) <= dateutil.parser.parse(x["timestamp"]), x["trump_interactions"]),
+                    default=["1970-01-01T00:00:00Z00:00", None],
+                    key=lambda p: abs((dateutil.parser.parse(p[0]) - dateutil.parser.parse(x["timestamp"])).total_seconds())
+                ),
+                min(
+                    filter(lambda p: dateutil.parser.parse(p[0]) > dateutil.parser.parse(x["timestamp"]), x["trump_interactions"]),
+                    default=["1970-01-01T00:00:00Z00:00", None],
+                    key=lambda p: abs((dateutil.parser.parse(p[0]) - dateutil.parser.parse(x["timestamp"])).total_seconds())
+                )
+            )
+        ).filter(
+            lambda x: abs((dateutil.parser.parse(x[1][0]) - dateutil.parser.parse(x[0]["timestamp"])).total_seconds()) < 1 * 3600 or abs(
+                (dateutil.parser.parse(x[2][0]) - dateutil.parser.parse(x[0]["timestamp"])).total_seconds()) < 1 * 3600
+        ).map(add_trump_status_id)
+            .checkpoint(output_path["before_and_after_filtered_single"], max_workers=2, overwrite=overwrite_all)
             .sentiment_analysis()
-            .extract_features("tweet")
-            .checkpoint(output_path["before_and_after_sentiments"], 2, overwrite=True)
+            .checkpoint(output_path["before_and_after_filtered_single_with_sentiment"], overwrite=overwrite_all)
     )
 
     data = (
-        retweeters
-            .filter(lambda tweet: tweet.get("interaction_type") in ("reply", "quote"))
-            .join(
-                trump_tweets.map(lambda tweet: {k: v for k,v in tweet.items() if k.startswith("trump")}),
-                "interaction_status_id", "trump_status_id"
-            )
-            .map(lambda pair: dict(**pair[0], **pair[1]))
-            .checkpoint(output_path["before_and_after_sentiments_with_trump"], overwrite=True)
+        retweeters.filter(lambda tweet: tweet["in_reply_to_status_id_str"] is not None or "quoted_status" in tweet)
+            .join(trump_tweets, "trump_status_id", "id_str")
+            .filter(
+            lambda pair: abs(
+                (dateutil.parser.parse(pair[0]["created_at"]) -
+                 dateutil.parser.parse(pair[1]["created_at"])).total_seconds()
+            ) < 10 * 60)
+            .map(lambda pair: pair[1])
+            .sentiment_analysis()
+            .extract_features()
+            .checkpoint(output_path["before_and_after_filtered_10mins"], overwrite=overwrite_all)
+            .join(trump_tweets, "trump_status_id", "trump_status_id")
+            .checkpoint(output_path["before_and_after_filtered_10mins_w_sentiment/"], overwrite=overwrite_all)
     )
-    return data
+    return pd.DataFrame(data.compute())
+
 
 if __name__ == "__main__":
     client = Client(threads_per_worker=2, memory_limit='6GB')
-    input_path = HierarchicalPath("/media/tmrlvi/My Passport/Research/causal_inference_data2/input")
-    output_path = HierarchicalPath("/media/tmrlvi/My Passport/Research/causal_inference_data2/output_pipeline")
+    input_path = HierarchicalPath(sys.argv[1])
+    output_path = HierarchicalPath(sys.argv[1])
     prepare_data_reply_analysis(input_path, output_path, overwrite_all=False)
     prepare_data_before_and_after(input_path, output_path, time_buffer=5 * 3600, overwrite_all=False)
     client.close()

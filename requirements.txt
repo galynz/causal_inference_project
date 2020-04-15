@@ -16,3 +16,4 @@ dask[dataframe,distributed]
 scikit-learn
 cloudpickle
 bokeh
+statsmodels

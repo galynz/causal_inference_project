@@ -1,3 +1,6 @@
+"""
+Downloads tweets of Trump and his retweeters.
+"""
 import json
 from functools import reduce
 
@@ -88,8 +91,5 @@ if __name__ == "__main__":
     auth.set_access_token(ACCESS_KEY, ACCESS_KEY_SECRET)
 
     api = tweepy.API(auth, wait_on_rate_limit=True, wait_on_rate_limit_notify=True)
-
-    #df = pd.read_csv("https://raw.githubusercontent.com/ENCASEH2020/hatespeech-twitter/master/hatespeech_labels.csv")
-    #download_tweet_list(api, "found_tweets.txt", list(df["tweet_id"].values))
 
     download_users_and_retweeters(api, r"D:\Research\causal_inference_data2", screen_name="realDonaldTrump")
